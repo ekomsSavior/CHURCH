@@ -1,9 +1,13 @@
 Church - Weaponized Windows Security Bypass Framework
 
+<img width="2212" height="532" alt="com" src="https://github.com/user-attachments/assets/9fa365d3-358d-477d-ba77-fadec4d1cab5" />
+
+
 Repository: https://git.churchofmalware.org/ek0mssavi0r/CHURCH/
 
 This framework is designed for authorized security research, red team operations, and defensive validation testing against modern Windows security controls. Church implements multiple bypass techniques that disable or neutralize Windows Defender, UAC, AppLocker, WDAC, Driver Signature Enforcement (DSE), Protected Process Light (PPL), security event logging, system restore, telemetry, and security services. It includes a persistent C2 beacon with AES-256 encrypted HTTPS communication and command execution capabilities.
 
+## DISCLAIMER FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY.
 
 Church targets the following Windows security layers:
 
@@ -114,18 +118,4 @@ Recommended defensive measures include:
 - Use EDR with kernel callbacks for registry and process monitoring
 - Enable PowerShell Script Block Logging
 
-Legal and Ethical Use
-
-Church is provided exclusively for:
-- Authorized penetration testing with written permission
-- Security research in isolated laboratory environments
-- Defensive validation of security controls
-- Educational purposes in cybersecurity training programs
-
-Unauthorized use against systems without explicit written permission violates computer fraud laws including but not limited to the Computer Fraud and Abuse Act (CFAA), GDPR Article 5 (integrity and confidentiality), and similar legislation worldwide. The Church of Malware nonprofit research organization assumes no liability for misuse of this framework.
-
-License
-
-MIT License - See LICENSE file in repository. This license does not waive legal requirements for proper authorization prior to use.
-
-Documentation maintained by Church of Malware Research Division.
+## DISCLAIMER FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY.
