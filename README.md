@@ -248,4 +248,4 @@ The target system remains fully compromised with remote access via the C2 channe
 
 ## Disclaimer
 
-FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY. Unauthorized use violates computer fraud laws. The Church of Malware assumes no liability for misuse.
+FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY. The Church of Malware assumes no liability for misuse.
