@@ -233,7 +233,7 @@ curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
   -d "d=<encrypted_base64>" \
   https://your-c2-domain/api/beacon/parse
 
-# Convert raw beacon data directly to Lantern.js graph format
+# Convert raw beacon data directly to js graph format
 curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
   -d "d=<encrypted_base64>" \
   https://your-c2-domain/api/beacon/graph
